@@ -512,6 +512,11 @@ def _normalize_image_part(part: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError(
                 "unsupported_content_type:Only image data URLs are supported. "
                 "Non-image data payloads are not supported.")
+        import base64
+        from gateway.platforms.api_server_images import validate_inline_image
+        raw, mime = validate_inline_image(url_value)
+        # Providers reject a declared MIME that disagrees with the actual image.
+        url_value = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
     elif not (lowered.startswith("http://") or lowered.startswith("https://")):
         raise ValueError(
             "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs.")
@@ -2983,8 +2988,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return payload
 
     @staticmethod
-    def _message_response(message: Dict[str, Any]) -> Dict[str, Any]:
+    def _message_response(message: Dict[str, Any], *, image_home=None) -> Dict[str, Any]:
         message = _project_client_message(message)
+        if message.get("role") == "user" and message.get("display_kind") != "hidden":
+            from agent.session_images import decode_image_content
+            from hermes_constants import get_hermes_home
+            content = decode_image_content(message.get("api_content"), image_home or get_hermes_home(), display=True)
+            if content is not None:
+                message = {**message, "content": content}
         safe_keys = (
             "id", "session_id", "role", "content", "tool_call_id", "tool_calls", "tool_name",
             "timestamp", "token_count", "finish_reason", "reasoning", "reasoning_content",
@@ -3234,9 +3245,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         limit = 500 if default_page else min(requested_limit, 500)
         messages = await asyncio.to_thread(
             db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page)
+        from pathlib import Path
+        client_messages = await asyncio.to_thread(
+            lambda: [self._message_response(m, image_home=Path(db.db_path).parent) for m in messages])
         return web.json_response({
             "object": "list", "session_id": resolved_id,
-            "data": [self._message_response(m) for m in messages],
+            "data": client_messages,
             "pagination": {
                 "limit": limit, "offset": offset,
                 "order": order or ("latest" if default_page else "oldest"),
@@ -4183,6 +4197,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
                         session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                    if not resume_unanswered_turn:
+                        from gateway.platforms.api_server_images import prepare_api_image_content
+                        prepare_api_image_content(user_message, agent)
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if resume_unanswered_turn:

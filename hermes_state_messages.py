@@ -1287,7 +1287,7 @@ class SessionMessagesMixin:
             rows = self._dedupe_display_generations(rows)
         return self._rows_to_conversation(rows, session_id=session_id, include_ancestors=include_ancestors,
             repair_alternation=repair_alternation, include_row_ids=include_row_ids,
-            include_summary_markers=repair_alternation)
+            include_summary_markers=repair_alternation, display_images=include_compacted)
 
     def _dedupe_replayed_user(self, messages, msg, exact_user_clones) -> Tuple[bool, Any]:
         """Ancestor-lineage dedupe of one decoded user *msg* -> ``(skip, exact_clone_key)``. Rotation
@@ -1313,7 +1313,7 @@ class SessionMessagesMixin:
 
     def _rows_to_conversation(self, rows, *, session_id: str, include_ancestors: bool, repair_alternation: bool,
                               include_row_ids: bool = False,
-                              include_summary_markers: bool = False) -> List[Dict[str, Any]]:
+                              include_summary_markers: bool = False, display_images: bool = False) -> List[Dict[str, Any]]:
         """Decode fetched rows (ordered by id, pre-filtered) into OpenAI format, stable key order. Every dict is
         stamped ``_DB_PERSISTED_MARKER_KEY`` (born durable) so an identity-losing handoff never re-appends the
         transcript on flush. ``_row_id`` is opt-in (gateway reactions); reasoning restored on assistant rows
@@ -1334,6 +1334,13 @@ class SessionMessagesMixin:
             if include_row_ids and row["id"] is not None:
                 msg["_row_id"] = row["id"]
             msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
+            if row["role"] == "user":
+                from pathlib import Path
+                from agent.session_images import decode_image_content
+                image_content = decode_image_content(row["api_content"], Path(self.db_path).parent, display=display_images)
+                if image_content is not None:
+                    msg["content"] = image_content
+                    msg.pop("api_content", None)
             if row["display_metadata"] and (decoded := self._decode_display_metadata(row["display_metadata"])) is not None:
                 msg["display_metadata"] = decoded
             if include_summary_markers and row["_compressed_summary"]:
@@ -1392,7 +1399,7 @@ class SessionMessagesMixin:
             include_ancestors=False, repair_alternation=True, include_row_ids=True, include_summary_markers=True)
         display_history = self._rows_to_conversation(
             self._dedupe_display_generations(rows), session_id=session_id,
-            include_ancestors=True, repair_alternation=False, include_row_ids=True)
+            include_ancestors=True, repair_alternation=False, include_row_ids=True, display_images=True)
         return model_history, display_history
 
     def _resume_lineage_ids(self, session_id: str) -> List[str]:
@@ -1446,7 +1453,8 @@ class SessionMessagesMixin:
         if not ancestor_ids:
             return []
         lineage = self._rows_to_conversation(
-            rows, session_id=session_id, include_ancestors=True, repair_alternation=False, include_row_ids=True)
+            rows, session_id=session_id, include_ancestors=True, repair_alternation=False, include_row_ids=True,
+            display_images=True)
         return [{k: v for k, v in message.items() if k != "_row_id"}
             for message in lineage if message.get("_row_id") in ancestor_ids]
 

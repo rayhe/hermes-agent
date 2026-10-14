@@ -423,6 +423,8 @@ def _resolve_conversation_history(
 ) -> "tuple[List[Dict[str, str]], Any, Any, web.Response | None]":
     """Return ``(history, instructions, stored_session_id, error)``; precedence:
     ``conversation_history`` > ``previous_response_id`` chain > all-but-last ``input`` messages."""
+    from gateway.platforms.api_server import _multimodal_validation_error, _normalize_multimodal_content
+
     instructions = body.get("instructions")
     previous_response_id = body.get("previous_response_id")
     conversation_history: List[Dict[str, str]] = []
@@ -436,7 +438,12 @@ def _resolve_conversation_history(
                 return [], instructions, None, _json_error(
                     _openai_error, f"conversation_history[{i}] must have 'role' and 'content' fields",
                     status=400)
-            conversation_history.append({"role": str(entry["role"]), "content": str(entry["content"])})
+            content = entry["content"]
+            try:
+                content = _normalize_multimodal_content(content) if entry["role"] == "user" else str(content)
+            except ValueError as exc:
+                return [], instructions, None, _multimodal_validation_error(exc, param="conversation_history")
+            conversation_history.append({"role": str(entry["role"]), "content": content})
         if previous_response_id:
             logger.debug("Both conversation_history and previous_response_id provided; using conversation_history")
     stored_session_id = None
@@ -451,10 +458,17 @@ def _resolve_conversation_history(
         for msg in raw_input[:-1]:
             if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
                 content = msg["content"]
-                if isinstance(content, list):  # flatten multi-part content blocks to text
+                if msg["role"] == "user":
+                    try:
+                        content = _normalize_multimodal_content(content)
+                    except ValueError as exc:
+                        return [], instructions, None, _multimodal_validation_error(exc, param="input")
+                elif isinstance(content, list):  # non-user multi-part content remains text-only
                     content = " ".join(p.get("text", "") for p in content
                                        if isinstance(p, dict) and p.get("type") == "text")
-                conversation_history.append({"role": msg["role"], "content": str(content)})
+                else:
+                    content = str(content)
+                conversation_history.append({"role": msg["role"], "content": content})
     return conversation_history, instructions, stored_session_id, None
 
 
@@ -653,7 +667,11 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if isinstance(raw_input, str):
         user_message = raw_input
     else:
-        user_message = raw_input[-1].get("content", "") if isinstance(raw_input, list) else ""
+        user_message = raw_input[-1].get("content", "") if isinstance(raw_input, list) and isinstance(raw_input[-1], dict) else ""
+    try:
+        user_message = _api_server._normalize_multimodal_content(user_message)
+    except ValueError as exc:
+        return _api_server._multimodal_validation_error(exc, param="input")
     if not user_message:
         return _json_error(_openai_error, "No user message found in input", status=400)
     try:
@@ -827,6 +845,8 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
             _api_server._publish_turn_process_ownership(agent, effective_task_id)
             # Passed only when set: a human turn keeps today's call shape.
             author_kwargs = {"turn_author": run.turn_author} if run.turn_author is not None else {}
+            from gateway.platforms.api_server_images import prepare_api_image_content
+            prepare_api_image_content(run.user_message, agent)
             r = agent.run_conversation(
                 user_message=run.user_message, conversation_history=run.conversation_history,
                 task_id=effective_task_id, **author_kwargs)

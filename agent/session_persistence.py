@@ -207,6 +207,23 @@ def _db_flush_row(agent, msg: Dict, is_current_turn_user: bool) -> Dict[str, Any
         and sanitize_context(content).strip() != content.strip()
     ):
         api_content = content
+    # Store multimodal wire bytes out of FTS, with profile-local references instead of base64.
+    # The clean override may differ from the model payload (desktop refs / per-turn notes).
+    if role == "user":
+        from pathlib import Path
+        from agent.session_images import encode_image_content
+        from hermes_constants import get_hermes_home
+        db = getattr(agent, "_session_db", None)
+        home = Path(db.db_path).parent if db is not None else get_hermes_home()
+        override = getattr(agent, "_persist_user_message_override", None)
+        if (is_current_turn_user and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
+                and isinstance(content, list) and isinstance(override, str)
+                and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content)):
+            content = [{"type": "text", "text": override}] + [
+                p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
+        image_sidecar = encode_image_content(msg.get("content"), home, display_content=content)
+        if image_sidecar is not None:
+            api_content = image_sidecar
     # Key order is the divert-JSONL wire order (divert_session_transcript_jsonl).
     row = {
         "role": role, "content": _durable_content(content), "tool_name": msg.get("tool_name"),

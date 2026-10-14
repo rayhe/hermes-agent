@@ -78,6 +78,45 @@ history that appears to revert.
 
 
 
+## Durable user-image content
+
+`agent/session_persistence.py` keeps the text/search projection in `messages.content`
+(including `[screenshot]` markers). Canonical native user-image parts additionally
+use `messages.api_content` as a `hermes-multimodal-v1:` JSON envelope, implemented
+by `agent/session_images.py`. This is distinct from the existing untagged string
+sidecar for injected user context; both remain supported, with no schema migration.
+
+Inline pixels are stored atomically in the owning profile's existing `images/`
+directory under content-addressed `api_<sha256>.<extension>` names. The envelope
+stores relative managed-file references, image detail, ordered text parts, and,
+when a persist override differs, separate clean display parts. It never stores
+inline base64. FTS indexes only the text projection, not the sidecar or image bytes.
+Trajectory exports remain text-only; they are not a multimodal replay store.
+
+`SessionDB.get_messages_as_conversation()` expands tagged sidecars using the
+**database's own home**, preserving the original model payload and dropping the
+serialized sidecar before wire assembly. Missing, corrupt, changed, or foreign
+file references produce explicit unavailable-image text without dropping the rest
+of the transcript. Paths cannot escape that home's `images/` tree, including
+symlink escapes. Authenticated API session reads expand the clean display parts
+into renderable `image_url` data URLs; raw `get_messages()` retains the searchable
+text projection and the internal sidecar.
+
+`gateway/platforms/api_server_images.py` validates inline data-URL syntax, base64,
+and complete raster image bytes with the shared ingest, frame-count, and decoded
+pixel limits. It adds the established native-attachment path hints only to a newly
+admitted inline-image turn, using the owning database's home. It does not rewrite
+prior messages, failed-turn resumes, toolsets, or the system prompt. Those hints
+also work with `tools.vision_tools_history_budget.native_turn_images`: a redundant
+full-image vision call can acknowledge native context while a region crop still
+loads pixels. Remote URL snapshotting is not included.
+
+Back up `images/` along with `state.db`. Shared files are retained after session
+deletion (there is no new attachment garbage collector). Old `[screenshot]`-only
+rows cannot be repaired without an original image. Older Hermes versions do not
+understand the tagged sidecar; downgrade/rollback can retain text but not replay
+these images.
+
 ## Codex app-server input ownership
 
 The agent persists an accepted user input before starting its Codex turn. Codex

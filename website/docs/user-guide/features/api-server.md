@@ -105,6 +105,28 @@ Standard OpenAI Chat Completions format. Stateless — the full conversation is 
 ```
 
 Uploaded files (`file` / `input_file` / `file_id`) and non-image `data:` URLs return `400 unsupported_content_type`.
+Malformed base64 (including literal `[omitted]`), non-image bytes, and incomplete or
+undecodable images return `400 invalid_image_url` before an agent starts. Inline
+images use the existing 50 MiB decoded-media ingest limit; the HTTP request-body
+limit still applies.
+
+Inline API image attachments are staged in the served profile's `images/` directory.
+The current user turn includes a short `[Image attached at: <path>]` handle, so
+`vision_analyze` can use the intact file rather than copying a base64 payload.
+Native-vision models keep the original image parts and can use the existing
+already-in-context fast path. Chat Completions, Responses, and `/v1/runs` accept
+inline image parts in user-message content; runs also preserve supplied user-image
+history. Remote HTTP(S) URLs are unchanged and are not snapshotted by this patch.
+Only complete decodable raster images are admitted as inline data URLs.
+
+Persisted images survive gateway restarts and authenticated session continuation.
+`GET /api/sessions/{id}/messages` returns renderable `image_url` parts containing
+image data URLs; it does not expose the internal persistence sidecar. Keep the
+profile's `images/` directory together with `state.db` when backing up or moving
+sessions. Missing, changed, or inaccessible attachments are reported as unavailable
+and require reattachment. Older rows that saved only `[screenshot]` cannot have
+their pixels recovered by this change. Session deletion does not garbage-collect
+shared attachment files.
 
 **Streaming** (`"stream": true`): Returns Server-Sent Events (SSE) with token-by-token response chunks. For **Chat Completions**, the stream uses standard `chat.completion.chunk` events plus Hermes' custom `hermes.tool.progress` event for tool-start UX. For **Responses**, the stream uses OpenAI Responses event types such as `response.created`, `response.output_text.delta`, `response.output_item.added`, `response.output_item.done`, and `response.completed`.
 

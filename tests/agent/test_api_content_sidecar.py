@@ -586,7 +586,12 @@ class TestWireInvariant:
         the same view — same contract as the string sidecar path."""
         make_agent, handler, db, sid = wire_env
         from run_agent import AIAgent
-        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        pixels = BytesIO()
+        Image.new("RGB", (2, 2), "red").save(pixels, format="PNG")
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(pixels.getvalue()).decode("ascii")}}
         turn = [{"type": "text", "text": "what is this"}, image]
 
         agent1 = make_agent()
@@ -597,7 +602,7 @@ class TestWireInvariant:
         assert sent == [*turn, {"type": "text", "text": "PLUGIN-CTX"}]
 
         history = db.get_messages_as_conversation(sid)
-        assert "PLUGIN-CTX" in history[0]["content"]  # persisted with the turn, not dropped
+        assert history[0]["content"] == sent  # images AND injected text replay byte-for-byte
 
         handler.captured_requests = []
         agent2 = make_agent()
